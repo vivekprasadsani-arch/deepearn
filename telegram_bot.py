@@ -1,6 +1,8 @@
 import os
 import asyncio
 import logging
+import threading
+from flask import Flask
 from dotenv import load_dotenv
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
@@ -469,6 +471,25 @@ async def process_phone_number(update: Update, context: ContextTypes.DEFAULT_TYP
 
 def main():
     """Start the bot"""
+    # Start Flask app in a separate thread for Render port binding
+    port = int(os.getenv("PORT", 10000))
+    flask_app = Flask(__name__)
+    
+    @flask_app.route("/")
+    def health_check():
+        return "Bot is running", 200
+    
+    def run_flask():
+        # Disable logging for Flask to keep terminal clean
+        import logging
+        log = logging.getLogger('werkzeug')
+        log.setLevel(logging.ERROR)
+        flask_app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
+    
+    flask_thread = threading.Thread(target=run_flask, daemon=True)
+    flask_thread.start()
+    logger.info(f"Flask server started on port {port} for Render health checks")
+
     application = Application.builder().token(BOT_TOKEN).build()
     
     # Add handlers
@@ -492,7 +513,7 @@ def main():
     
     # Start bot
     logger.info("Bot starting...")
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+    application.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
 
 if __name__ == '__main__':
     main()
