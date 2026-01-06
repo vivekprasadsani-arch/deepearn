@@ -137,8 +137,10 @@ class APIClient:
                 token = data.get("data", {}).get("token", "")
                 return True, token, "Login successful"
             else:
+                logger.warning(f"Login failed on {self.domain} for {email}: {data.get('msg')} (Response: {response.text})")
                 return False, None, data.get("msg", "Login failed")
         except Exception as e:
+            logger.error(f"Login exception on {self.domain}: {e}")
             return False, None, str(e)
     
     async def request_whatsapp_link(self, session: AsyncSession, token: str, phone: str) -> Tuple[bool, Optional[str], Optional[str], str]:
@@ -163,14 +165,16 @@ class APIClient:
                 otp = data.get("data", {}).get("phone_code")
                 # If OTP is empty, try a small delay and check if it's really missing
                 if not otp:
-                     logger.warning(f"OTP missing in initial response for {phone} on {self.domain}. Retrying log check...")
+                     logger.warning(f"OTP missing in initial response for {phone} on {self.domain}. Response: {response.text}")
                      # In some cases, success but empty data means blocked or delayed.
                      return True, device_uuid, None, "Link requested but OTP is empty. Please check again."
                 
                 return True, device_uuid, otp, "OTP generated"
             else:
+                logger.warning(f"Link request failed on {self.domain} for {phone}: {data.get('msg')} (Response: {response.text})")
                 return False, None, None, data.get("msg", "Failed to get OTP")
         except Exception as e:
+            logger.error(f"Link request exception on {self.domain}: {e}")
             return False, None, None, str(e)
     
     async def check_login_status(self, session: AsyncSession, token: str, device_uuid: str) -> Tuple[bool, str]:
