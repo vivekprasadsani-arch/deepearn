@@ -19,13 +19,19 @@ class APIClient:
         self.user_agent = "Mozilla/5.0 (Linux; Android 13; SM-G991B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
 
     def _get_proxy(self) -> Optional[str]:
-        """Get proxy string if enabled"""
+        """Get proxy string if enabled and ensure protocol is present"""
         try:
             enabled = self.db.get_setting("proxy_enabled")
             if enabled == "1":
                 proxy_url = self.db.get_setting("proxy_url")
                 if proxy_url:
-                    return proxy_url.strip()
+                    proxy_url = proxy_url.strip()
+                    # If no protocol specified, default to http://
+                    if "://" not in proxy_url:
+                        # For abcproxy and similar, often they are socks5, but we'll default to http
+                        # and let the user know if it fails.
+                        proxy_url = f"http://{proxy_url}"
+                    return proxy_url
         except Exception as e:
             logger.error(f"Error reading proxy from DB: {e}")
             return None
@@ -67,9 +73,10 @@ class APIClient:
         """
         proxy = self._get_proxy()
         if proxy:
-            # Mask sensitive parts of the proxy for logging
-            masked_proxy = proxy.split('@')[-1] if '@' in proxy else proxy
-            logger.info(f"Using proxy: ...@{masked_proxy}")
+            # Mask password for logging: protocol://user:pass@host:port -> protocol://user:***@host:port
+            import re
+            masked_proxy = re.sub(r':([^@/:]+)@', ':***@', proxy)
+            logger.info(f"Using proxy: {masked_proxy}")
         
         # Adding verify=False to ignore SSL issues with some proxies
         session = AsyncSession(impersonate="chrome120", proxy=proxy if proxy else None, verify=False)
