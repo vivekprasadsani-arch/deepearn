@@ -85,7 +85,7 @@ class APIClient:
             proxies=proxies, 
             verify=False,
             timeout=120,
-            allow_http2=False if proxy else True
+            http2=False if proxy else True
         )
         
         username = self._generate_random_string(8)
