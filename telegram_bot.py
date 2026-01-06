@@ -82,7 +82,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # Set default mode if not set
     if user_id not in user_states:
-        user_states[user_id] = "Site 1"
+        user_states[user_id] = {"domain": "tdjdnsd.vip", "display_name": "Site 1"}
     
     if db.is_user_approved(user_id):
         current = user_states.get(user_id)

@@ -208,7 +208,7 @@ class Database:
     def get_sites(self) -> List[dict]:
         """Get all sites"""
         try:
-            response = self.client.table("sites").select("*").order("created_at", asc=True).execute()
+            response = self.client.table("sites").select("*").order("created_at", desc=False).execute()
             return response.data
         except Exception as e:
             logger.error(f"Error getting sites: {e}")
