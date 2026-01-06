@@ -303,7 +303,7 @@ async def set_proxy(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
         
-    proxy_url = context.args[0]
+    proxy_url = context.args[0].strip()
     db.set_setting("proxy_url", proxy_url)
     await update.message.reply_text(f"✅ প্রক্সি URL সেট করা হয়েছে:\n`{proxy_url}`", parse_mode='Markdown')
 
