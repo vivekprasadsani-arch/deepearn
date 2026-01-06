@@ -1,216 +1,222 @@
 import os
-import psycopg2
-from psycopg2.extras import RealDictCursor
+import logging
+from supabase import create_client, Client
 from datetime import datetime
-from typing import Optional, List, Tuple
+from typing import Optional, List
 import pytz
 from dotenv import load_dotenv
 
 load_dotenv()
 
+logger = logging.getLogger(__name__)
+
 class Database:
     def __init__(self):
-        self.conn_params = {
-            "host": os.getenv("SUPABASE_DB_HOST"),
-            "database": os.getenv("SUPABASE_DB_NAME"),
-            "user": os.getenv("SUPABASE_DB_USER"),
-            "password": os.getenv("SUPABASE_DB_PASSWORD"),
-            "port": os.getenv("SUPABASE_DB_PORT", "5432")
-        }
-    
-    def get_connection(self):
-        """Create a database connection"""
-        return psycopg2.connect(**self.conn_params)
+        url: str = os.getenv("SUPABASE_URL")
+        key: str = os.getenv("SUPABASE_KEY")
+        if not url or not key:
+            logger.error("SUPABASE_URL or SUPABASE_KEY missing from environment variables")
+            raise ValueError("Supabase configuration missing")
+        self.client: Client = create_client(url, key)
     
     def set_setting(self, key: str, value: str):
         """Set a global setting"""
-        with self.get_connection() as conn:
-            with conn.cursor() as cursor:
-                cursor.execute(
-                    'INSERT INTO settings (key, value) VALUES (%s, %s) '
-                    'ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value',
-                    (key, value)
-                )
-                conn.commit()
+        try:
+            self.client.table("settings").upsert({"key": key, "value": value}).execute()
+        except Exception as e:
+            logger.error(f"Error setting setting {key}: {e}")
 
     def get_setting(self, key: str) -> Optional[str]:
         """Get a global setting"""
-        with self.get_connection() as conn:
-            with conn.cursor() as cursor:
-                cursor.execute('SELECT value FROM settings WHERE key = %s', (key,))
-                result = cursor.fetchone()
-                return result[0] if result else None
+        try:
+            response = self.client.table("settings").select("value").eq("key", key).execute()
+            return response.data[0]["value"] if response.data else None
+        except Exception as e:
+            logger.error(f"Error getting setting {key}: {e}")
+            return None
     
     def add_user(self, user_id: int):
         """Add a new user"""
-        with self.get_connection() as conn:
-            with conn.cursor() as cursor:
-                cursor.execute(
-                    'INSERT INTO users (user_id, created_at) VALUES (%s, %s) ON CONFLICT (user_id) DO NOTHING',
-                    (user_id, datetime.utcnow())
-                )
-                conn.commit()
+        try:
+            self.client.table("users").upsert({
+                "user_id": int(user_id), 
+                "created_at": datetime.utcnow().isoformat()
+            }).execute()
+        except Exception as e:
+            logger.error(f"Error adding user {user_id}: {e}")
 
     def remove_user(self, user_id: int):
         """Remove a user and their related data"""
-        with self.get_connection() as conn:
-            with conn.cursor() as cursor:
-                cursor.execute('DELETE FROM users WHERE user_id = %s', (user_id,))
-                conn.commit()
+        try:
+            self.client.table("users").delete().eq("user_id", int(user_id)).execute()
+            self.client.table("referral_codes").delete().eq("user_id", int(user_id)).execute()
+        except Exception as e:
+            logger.error(f"Error removing user {user_id}: {e}")
 
     def get_user_details(self, user_id: int) -> Optional[dict]:
         """Get user details"""
-        with self.get_connection() as conn:
-            with conn.cursor(cursor_factory=RealDictCursor) as cursor:
-                cursor.execute('SELECT * FROM users WHERE user_id = %s', (user_id,))
-                row = cursor.fetchone()
-                return dict(row) if row else None
+        try:
+            response = self.client.table("users").select("*").eq("user_id", int(user_id)).execute()
+            return response.data[0] if response.data else None
+        except Exception as e:
+            logger.error(f"Error getting user details {user_id}: {e}")
+            return None
 
     def get_all_users_detailed(self) -> List[dict]:
         """Get all users with approval status"""
-        with self.get_connection() as conn:
-            with conn.cursor(cursor_factory=RealDictCursor) as cursor:
-                cursor.execute('SELECT * FROM users ORDER BY created_at DESC')
-                return [dict(row) for row in cursor.fetchall()]
+        try:
+            response = self.client.table("users").select("*").order("created_at", desc=True).execute()
+            return response.data
+        except Exception as e:
+            logger.error(f"Error getting all users detailed: {e}")
+            return []
     
     def approve_user(self, user_id: int) -> bool:
         """Approve a user"""
-        with self.get_connection() as conn:
-            with conn.cursor() as cursor:
-                cursor.execute('UPDATE users SET approved = 1 WHERE user_id = %s', (user_id,))
-                conn.commit()
-                return cursor.rowcount > 0
+        try:
+            response = self.client.table("users").update({"approved": 1}).eq("user_id", int(user_id)).execute()
+            return len(response.data) > 0
+        except Exception as e:
+            logger.error(f"Error approving user {user_id}: {e}")
+            return False
     
     def is_user_approved(self, user_id: int) -> bool:
         """Check if user is approved"""
-        with self.get_connection() as conn:
-            with conn.cursor() as cursor:
-                cursor.execute('SELECT approved FROM users WHERE user_id = %s', (user_id,))
-                result = cursor.fetchone()
-                return result and result[0] == 1
+        try:
+            response = self.client.table("users").select("approved").eq("user_id", int(user_id)).execute()
+            return response.data and response.data[0]["approved"] == 1
+        except Exception as e:
+            logger.error(f"Error checking approval {user_id}: {e}")
+            return False
     
     def set_referral_code(self, user_id: int, code: str):
         """Set or update referral code for user"""
-        with self.get_connection() as conn:
-            with conn.cursor() as cursor:
-                cursor.execute(
-                    'INSERT INTO referral_codes (user_id, code, updated_at) VALUES (%s, %s, %s) '
-                    'ON CONFLICT (user_id) DO UPDATE SET code = EXCLUDED.code, updated_at = EXCLUDED.updated_at',
-                    (user_id, code, datetime.utcnow())
-                )
-                conn.commit()
+        try:
+            self.client.table("referral_codes").upsert({
+                "user_id": int(user_id), 
+                "code": code, 
+                "updated_at": datetime.utcnow().isoformat()
+            }).execute()
+        except Exception as e:
+            logger.error(f"Error setting referral code {user_id}: {e}")
     
     def get_referral_code(self, user_id: int) -> Optional[str]:
         """Get last used referral code for user"""
-        with self.get_connection() as conn:
-            with conn.cursor() as cursor:
-                cursor.execute('SELECT code FROM referral_codes WHERE user_id = %s', (user_id,))
-                result = cursor.fetchone()
-                return result[0] if result else None
+        try:
+            response = self.client.table("referral_codes").select("code").eq("user_id", int(user_id)).execute()
+            return response.data[0]["code"] if response.data else None
+        except Exception as e:
+            logger.error(f"Error getting referral code {user_id}: {e}")
+            return None
     
     def add_account(self, user_id: int, email: str, password: str, 
                    phone_number: str, referral_code: str, domain: str) -> int:
         """Add a new account"""
-        with self.get_connection() as conn:
-            with conn.cursor() as cursor:
-                cursor.execute(
-                    '''INSERT INTO accounts 
-                       (user_id, email, password, phone_number, referral_code, domain, created_at)
-                       VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id''',
-                    (user_id, email, password, phone_number, referral_code, domain, datetime.utcnow())
-                )
-                account_id = cursor.fetchone()[0]
-                conn.commit()
-                return account_id
+        try:
+            response = self.client.table("accounts").insert({
+                "user_id": int(user_id),
+                "email": email,
+                "password": password,
+                "phone_number": phone_number,
+                "referral_code": referral_code,
+                "domain": domain,
+                "created_at": datetime.utcnow().isoformat()
+            }).execute()
+            return response.data[0]["id"] if response.data else 0
+        except Exception as e:
+            logger.error(f"Error adding account for user {user_id}: {e}")
+            return 0
     
     def update_login_status(self, account_id: int, status: str):
         """Update account login status"""
-        with self.get_connection() as conn:
-            with conn.cursor() as cursor:
-                cursor.execute(
-                    'UPDATE accounts SET login_status = %s WHERE id = %s',
-                    (status, account_id)
-                )
-                conn.commit()
+        try:
+            self.client.table("accounts").update({"login_status": status}).eq("id", account_id).execute()
+        except Exception as e:
+            logger.error(f"Error updating login status for account {account_id}: {e}")
 
     def is_phone_used(self, phone_number: str, domain: str = None) -> bool:
         """Check if phone number already used for specific domain"""
         if not domain: 
              return False
-        with self.get_connection() as conn:
-            with conn.cursor() as cursor:
-                cursor.execute('SELECT 1 FROM site_phone_numbers WHERE phone_number = %s AND domain = %s', (phone_number, domain))
-                return cursor.fetchone() is not None
+        try:
+            response = self.client.table("site_phone_numbers")\
+                .select("phone_number")\
+                .eq("phone_number", phone_number)\
+                .eq("domain", domain)\
+                .execute()
+            return len(response.data) > 0
+        except Exception as e:
+            logger.error(f"Error checking phone use {phone_number}: {e}")
+            return False
     
     def add_phone_number(self, phone_number: str, user_id: int, domain: str = None):
         """Add phone number to used list for specific domain"""
         if not domain:
             return
-        with self.get_connection() as conn:
-            with conn.cursor() as cursor:
-                cursor.execute(
-                    'INSERT INTO site_phone_numbers (phone_number, domain, user_id, created_at) VALUES (%s, %s, %s, %s) '
-                    'ON CONFLICT (phone_number, domain) DO NOTHING',
-                    (phone_number, domain, user_id, datetime.utcnow())
-                )
-                conn.commit()
+        try:
+            self.client.table("site_phone_numbers").upsert({
+                "phone_number": phone_number,
+                "domain": domain,
+                "user_id": int(user_id),
+                "created_at": datetime.utcnow().isoformat()
+            }).execute()
+        except Exception as e:
+            logger.error(f"Error adding phone number {phone_number}: {e}")
     
     def get_today_stats(self, user_id: int, domain: str = None) -> int:
         """Get count of successfully logged in accounts today (Bangladesh time)"""
-        bd_tz = pytz.timezone('Asia/Dhaka')
-        now_bd = datetime.now(bd_tz)
-        today_start = now_bd.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(pytz.utc)
-        
-        with self.get_connection() as conn:
-            with conn.cursor() as cursor:
-                if domain:
-                    cursor.execute(
-                        '''SELECT COUNT(*) FROM accounts 
-                           WHERE user_id = %s 
-                           AND login_status = 'success'
-                           AND domain = %s
-                           AND created_at >= %s''',
-                        (user_id, domain, today_start)
-                    )
-                else:
-                    cursor.execute(
-                        '''SELECT COUNT(*) FROM accounts 
-                           WHERE user_id = %s 
-                           AND login_status = 'success'
-                           AND created_at >= %s''',
-                        (user_id, today_start)
-                    )
-                result = cursor.fetchone()
-                return result[0] if result else 0
+        try:
+            bd_tz = pytz.timezone('Asia/Dhaka')
+            now_bd = datetime.now(bd_tz)
+            today_start = now_bd.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(pytz.utc).isoformat()
+            
+            query = self.client.table("accounts")\
+                .select("id", count="exact")\
+                .eq("user_id", int(user_id))\
+                .eq("login_status", "success")\
+                .gte("created_at", today_start)
+            
+            if domain:
+                query = query.eq("domain", domain)
+                
+            response = query.execute()
+            return response.count if response.count is not None else 0
+        except Exception as e:
+            logger.error(f"Error getting stats for user {user_id}: {e}")
+            return 0
     
     def get_all_users(self) -> List[int]:
         """Get all user IDs"""
-        with self.get_connection() as conn:
-            with conn.cursor() as cursor:
-                cursor.execute('SELECT user_id FROM users')
-                return [row[0] for row in cursor.fetchall()]
+        try:
+            response = self.client.table("users").select("user_id").execute()
+            return [row["user_id"] for row in response.data]
+        except Exception as e:
+            logger.error(f"Error getting all user IDs: {e}")
+            return []
 
     def add_site(self, domain: str, user_display_name: str):
         """Add a new site"""
-        with self.get_connection() as conn:
-            with conn.cursor() as cursor:
-                cursor.execute(
-                    'INSERT INTO sites (domain, user_display_name, created_at) VALUES (%s, %s, %s) '
-                    'ON CONFLICT (domain) DO UPDATE SET user_display_name = EXCLUDED.user_display_name',
-                    (domain, user_display_name, datetime.utcnow())
-                )
-                conn.commit()
+        try:
+            self.client.table("sites").upsert({
+                "domain": domain,
+                "user_display_name": user_display_name,
+                "created_at": datetime.utcnow().isoformat()
+            }).execute()
+        except Exception as e:
+            logger.error(f"Error adding site {domain}: {e}")
 
     def get_sites(self) -> List[dict]:
         """Get all sites"""
-        with self.get_connection() as conn:
-            with conn.cursor(cursor_factory=RealDictCursor) as cursor:
-                cursor.execute('SELECT * FROM sites ORDER BY created_at ASC')
-                return [dict(row) for row in cursor.fetchall()]
+        try:
+            response = self.client.table("sites").select("*").order("created_at", asc=True).execute()
+            return response.data
+        except Exception as e:
+            logger.error(f"Error getting sites: {e}")
+            return []
 
     def delete_site(self, domain: str):
         """Delete a site"""
-        with self.get_connection() as conn:
-            with conn.cursor() as cursor:
-                cursor.execute('DELETE FROM sites WHERE domain = %s', (domain,))
-                conn.commit()
+        try:
+            self.client.table("sites").delete().eq("domain", domain).execute()
+        except Exception as e:
+            logger.error(f"Error deleting site {domain}: {e}")
