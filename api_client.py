@@ -72,14 +72,21 @@ class APIClient:
         Returns: (success, email, password, message, session)
         """
         proxy = self._get_proxy()
+        proxies = {"http": proxy, "https": proxy} if proxy else None
+        
         if proxy:
-            # Mask password for logging: protocol://user:pass@host:port -> protocol://user:***@host:port
             import re
             masked_proxy = re.sub(r':([^@/:]+)@', ':***@', proxy)
-            logger.info(f"Using proxy: {masked_proxy}")
+            logger.info(f"Initializing session with proxy: {masked_proxy}")
         
-        # Adding verify=False to ignore SSL issues with some proxies
-        session = AsyncSession(impersonate="chrome120", proxy=proxy if proxy else None, verify=False)
+        # Using proxies dict, verify=False, and disabling HTTP/2 for better proxy compatibility
+        session = AsyncSession(
+            impersonate="chrome120", 
+            proxies=proxies, 
+            verify=False,
+            timeout=120,
+            allow_http2=False if proxy else True
+        )
         
         username = self._generate_random_string(8)
         email = f"{username}@mailto.plus"
