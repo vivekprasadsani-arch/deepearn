@@ -23,8 +23,11 @@ class APIClient:
         try:
             enabled = self.db.get_setting("proxy_enabled")
             if enabled == "1":
-                return self.db.get_setting("proxy_url")
-        except:
+                proxy_url = self.db.get_setting("proxy_url")
+                if proxy_url:
+                    return proxy_url.strip()
+        except Exception as e:
+            logger.error(f"Error reading proxy from DB: {e}")
             return None
         return None
         
@@ -63,6 +66,11 @@ class APIClient:
         Returns: (success, email, password, message, session)
         """
         proxy = self._get_proxy()
+        if proxy:
+            # Mask sensitive parts of the proxy for logging
+            masked_proxy = proxy.split('@')[-1] if '@' in proxy else proxy
+            logger.info(f"Using proxy: ...@{masked_proxy}")
+        
         # Adding verify=False to ignore SSL issues with some proxies
         session = AsyncSession(impersonate="chrome120", proxy=proxy if proxy else None, verify=False)
         
