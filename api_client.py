@@ -138,6 +138,18 @@ class APIClient:
             logger.error(f"Login exception on {self.domain}: {e}")
             return False, None, str(e)
     
+    
+    def _get_country_code(self, phone: str) -> str:
+        """Extract country code from phone number"""
+        cleaned = phone.replace('+', '').strip()
+        # Common country codes mapping
+        # Sorted by length desc to match longer codes first (e.g. 1 vs 1242)
+        codes = sorted(['1', '880', '91', '44', '60', '62', '84', '92', '55', '7'], key=len, reverse=True)
+        for code in codes:
+            if cleaned.startswith(code):
+                return code
+        return "1" # Default to US/Canada if unknown
+
     async def request_whatsapp_link(self, session: AsyncSession, token: str, phone: str) -> Tuple[bool, Optional[str], Optional[str], str]:
         """
         Request WhatsApp linking using existing session
@@ -147,13 +159,16 @@ class APIClient:
         url = f"{self.base_url}/h5/taskUser/phoneCode"
         headers = self._get_common_headers(token)
         
-        # Ensure phone has + if it's missing (helps with some APIs)
+        # Ensure phone has + if it's missing
         formatted_phone = phone if phone.startswith("+") else f"+{phone}"
+        country_code = self._get_country_code(formatted_phone)
         
         payload = {
             "uuid": device_uuid,
             "phone": formatted_phone,
-            "type": 2
+            "type": 2,
+            "country_code": country_code,
+            "lang": "en"
         }
         
         try:
