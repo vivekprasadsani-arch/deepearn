@@ -79,13 +79,12 @@ class APIClient:
             masked_proxy = re.sub(r':([^@/:]+)@', ':***@', proxy)
             logger.info(f"Initializing session with proxy: {masked_proxy}")
         
-        # Using proxies dict, verify=False, and disabling HTTP/2 for better proxy compatibility
+        # Using proxies dict and verify=False for proxy compatibility
         session = AsyncSession(
             impersonate="chrome120", 
             proxies=proxies, 
             verify=False,
-            timeout=120,
-            http2=False if proxy else True
+            timeout=120
         )
         
         username = self._generate_random_string(8)
