@@ -1,5 +1,14 @@
 -- Supabase Schema for DeepEarn Bot
 
+-- Drop existing tables (optional, but ensures clean slate)
+-- DROP TABLE IF EXISTS site_phone_numbers CASCADE;
+-- DROP TABLE IF EXISTS phone_numbers CASCADE;
+-- DROP TABLE IF EXISTS accounts CASCADE;
+-- DROP TABLE IF EXISTS sites CASCADE;
+-- DROP TABLE IF EXISTS referral_codes CASCADE;
+-- DROP TABLE IF EXISTS users CASCADE;
+-- DROP TABLE IF EXISTS settings CASCADE;
+
 -- Users table
 CREATE TABLE IF NOT EXISTS users (
     user_id BIGINT PRIMARY KEY,
@@ -55,6 +64,23 @@ CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
     value TEXT
 );
+
+-- Enable RLS and Add Policies (Matches mnit-backup style)
+ALTER TABLE users ENABLE ROW LEVEL SECURITY;
+ALTER TABLE referral_codes ENABLE ROW LEVEL SECURITY;
+ALTER TABLE sites ENABLE ROW LEVEL SECURITY;
+ALTER TABLE accounts ENABLE ROW LEVEL SECURITY;
+ALTER TABLE phone_numbers ENABLE ROW LEVEL SECURITY;
+ALTER TABLE site_phone_numbers ENABLE ROW LEVEL SECURITY;
+ALTER TABLE settings ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "Allow all on users" ON users FOR ALL USING (true) WITH CHECK (true);
+CREATE POLICY "Allow all on referral_codes" ON referral_codes FOR ALL USING (true) WITH CHECK (true);
+CREATE POLICY "Allow all on sites" ON sites FOR ALL USING (true) WITH CHECK (true);
+CREATE POLICY "Allow all on accounts" ON accounts FOR ALL USING (true) WITH CHECK (true);
+CREATE POLICY "Allow all on phone_numbers" ON phone_numbers FOR ALL USING (true) WITH CHECK (true);
+CREATE POLICY "Allow all on site_phone_numbers" ON site_phone_numbers FOR ALL USING (true) WITH CHECK (true);
+CREATE POLICY "Allow all on settings" ON settings FOR ALL USING (true) WITH CHECK (true);
 
 -- Insert initial sites if they don't exist
 INSERT INTO sites (domain, user_display_name) 
