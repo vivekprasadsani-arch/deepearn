@@ -435,6 +435,15 @@ async def process_phone_number(update: Update, context: ContextTypes.DEFAULT_TYP
             # Save pending account
             account_id = db.add_account(user_id, email, password, phone, referral_code, domain)
             
+            if not otp:
+                await status_msg.edit_text(
+                    f"⚠️ [{mode_label}] লিংক রিকোয়েস্ট হয়েছে কিন্তু ওটিপি (OTP) পাওয়া যায়নি।\n\n"
+                    f"📱 নাম্বার: {phone}\n"
+                    "সম্ভবত আপনার আইপি ব্লক করা হয়েছে অথবা সাইট থেকে ডাটা দিতে দেরি করছে। প্রক্সি ব্যবহার করে পুনরায় চেষ্টা করুন।"
+                )
+                await api.close_session(session)
+                return
+
             await status_msg.edit_text(
                 f"✅ [{mode_label}] লিংক রিকোয়েস্ট সফল!\n\n"
                 f"📱 নাম্বার: {phone}\n"
