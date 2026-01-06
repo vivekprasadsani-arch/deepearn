@@ -43,28 +43,23 @@ class APIClient:
         return ''.join(random.choice(letters) for i in range(length))
     
     def _generate_uuid(self):
-        """Generate UUID for WhatsApp linking"""
-        return ''.join(random.choices(string.ascii_lowercase + string.digits, k=17))
+        """Generate UUID for WhatsApp linking (16 chars is standard)"""
+        return ''.join(random.choices(string.ascii_lowercase + string.digits, k=16))
     
     def _get_common_headers(self, token: str = ""):
         """Return a dictionary of common headers used across requests"""
-        return {
-            "authority": f"api.{self.domain}",
+        headers = {
             "accept": "application/json, text/plain, */*",
             "accept-language": "en-US,en;q=0.9,bn;q=0.8",
             "content-type": "application/json",
             "h5-platform": self.domain,
             "origin": self.origin,
             "referer": self.referer,
-            "sec-ch-ua": '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
-            "sec-ch-ua-mobile": "?1",
-            "sec-ch-ua-platform": '"Android"',
-            "sec-fetch-dest": "empty",
-            "sec-fetch-mode": "cors",
-            "sec-fetch-site": "same-site",
-            "user-agent": self.user_agent,
-            "x-token": token
+            "user-agent": self.user_agent
         }
+        if token:
+            headers["x-token"] = token
+        return headers
 
     async def register_account(self, referral_code: str) -> Tuple[bool, str, str, str, Optional[AsyncSession]]:
         """
@@ -152,9 +147,12 @@ class APIClient:
         url = f"{self.base_url}/h5/taskUser/phoneCode"
         headers = self._get_common_headers(token)
         
+        # Ensure phone has + if it's missing (helps with some APIs)
+        formatted_phone = phone if phone.startswith("+") else f"+{phone}"
+        
         payload = {
             "uuid": device_uuid,
-            "phone": phone,
+            "phone": formatted_phone,
             "type": 2
         }
         
