@@ -1,7 +1,8 @@
 from curl_cffi.requests import AsyncSession
+import os
 import random
 import string
-from typing import Tuple, Optional
+from typing import Tuple, Optional, Dict, Any, List
 import asyncio
 import logging
 from database import Database
@@ -14,12 +15,57 @@ class APIClient:
         self.base_url = f"https://api.{domain}"
         self.origin = f"https://{domain}"
         self.referer = f"https://{domain}/"
-        self.db = Database()
-        # Use a consistent, modern User-Agent
-        self.user_agent = "Mozilla/5.0 (Linux; Android 13; SM-G991B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
+        self.request_timeout = int(os.getenv("API_TIMEOUT", "120"))
+        self.register_paths = [
+            "/h5/taskBase/biz3/register",
+            "/h5/taskBase/register",
+        ]
+        self.login_paths = [
+            "/h5/taskBase/login",
+        ]
+
+        domains_from_env = os.getenv("ACCOUNT_EMAIL_DOMAINS", "mailto.plus,gmail.com")
+        self.email_domains = [d.strip() for d in domains_from_env.split(",") if d.strip()]
+        if not self.email_domains:
+            self.email_domains = ["mailto.plus"]
+
+        self.db = None
+        if os.getenv("SUPABASE_URL") and os.getenv("SUPABASE_KEY"):
+            try:
+                self.db = Database()
+            except Exception as e:
+                logger.warning(
+                    "Database unavailable; running without DB-backed settings (proxy disabled): %s",
+                    e
+                )
+        # Match current browser pattern seen in HAR to reduce anti-bot variance.
+        self.user_agent = os.getenv(
+            "API_USER_AGENT",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
+        )
+
+    def create_session(self) -> AsyncSession:
+        """Create an AsyncSession configured with optional proxy."""
+        proxy = self._get_proxy()
+        proxies = {"http": proxy, "https": proxy} if proxy else None
+
+        if proxy:
+            import re
+            masked_proxy = re.sub(r':([^@/:]+)@', ':***@', proxy)
+            logger.info(f"Initializing session with proxy: {masked_proxy}")
+
+        return AsyncSession(
+            impersonate="chrome120",
+            proxies=proxies,
+            verify=False,
+            timeout=self.request_timeout
+        )
 
     def _get_proxy(self) -> Optional[str]:
         """Get proxy string if enabled and ensure protocol is present"""
+        if not self.db:
+            return None
         try:
             enabled = self.db.get_setting("proxy_enabled")
             if enabled == "1":
@@ -41,72 +87,104 @@ class APIClient:
         """Generate random string for email"""
         letters = string.ascii_lowercase + string.digits
         return ''.join(random.choice(letters) for i in range(length))
-    
+
+    def _generate_password(self, length=8) -> str:
+        """Generate numeric password to maximize backend compatibility."""
+        return ''.join(random.choice(string.digits) for _ in range(length))
+
+    def _generate_email(self) -> str:
+        """Generate random email using configured domains."""
+        username = self._generate_random_string(10)
+        domain = random.choice(self.email_domains)
+        return f"{username}@{domain}"
+
     def _generate_uuid(self):
         """Generate UUID for WhatsApp linking (16 chars is standard)"""
         return ''.join(random.choices(string.ascii_lowercase + string.digits, k=16))
-    
-    def _get_common_headers(self, token: str = ""):
+
+    def _get_common_headers(self, token: Optional[str] = None):
         """Return a dictionary of common headers used across requests"""
         headers = {
-            "accept": "application/json, text/plain, */*",
+            "accept": "*/*",
             "accept-language": "en-US,en;q=0.9,bn;q=0.8",
             "content-type": "application/json",
             "h5-platform": self.domain,
             "origin": self.origin,
             "referer": self.referer,
-            "user-agent": self.user_agent
+            "user-agent": self.user_agent,
+            "x-token": token or ""
         }
-        if token:
-            headers["x-token"] = token
         return headers
+
+    async def _post_json(
+        self,
+        session: AsyncSession,
+        url: str,
+        headers: Dict[str, str],
+        payload: Dict[str, Any],
+    ) -> Tuple[Optional[int], Dict[str, Any], str]:
+        """Send POST and return (status_code, parsed_json, raw_text)."""
+        response = await session.post(url, headers=headers, json=payload, timeout=self.request_timeout)
+        raw = response.text or ""
+        try:
+            data = response.json()
+        except Exception:
+            data = {}
+        return response.status_code, data, raw
 
     async def register_account(self, referral_code: str) -> Tuple[bool, str, str, str, Optional[AsyncSession]]:
         """
         Register a new account
         Returns: (success, email, password, message, session)
         """
-        proxy = self._get_proxy()
-        proxies = {"http": proxy, "https": proxy} if proxy else None
-        
-        if proxy:
-            import re
-            masked_proxy = re.sub(r':([^@/:]+)@', ':***@', proxy)
-            logger.info(f"Initializing session with proxy: {masked_proxy}")
-        
-        # Using proxies dict and verify=False for proxy compatibility
-        session = AsyncSession(
-            impersonate="chrome120", 
-            proxies=proxies, 
-            verify=False,
-            timeout=120
-        )
-        
-        username = self._generate_random_string(8)
-        email = f"{username}@mailto.plus"
-        password = f"{username}@"
-        
-        url = f"{self.base_url}/h5/taskBase/biz3/register"
+        session = self.create_session()
+
+        email = self._generate_email()
+        password = self._generate_password(8)
+
         headers = self._get_common_headers()
-        
-        payload = {
-            "email": email,
-            "password": password,
-            "confirmPassword": password,
-            "promo_code": referral_code,
-            "source": None
-        }
-        
+        errors: List[str] = []
+
         try:
-            response = await session.post(url, headers=headers, json=payload, timeout=120)
-            data = response.json()
-            if data.get("code") == 0:
-                logger.info(f"Account registered: {email} on {self.domain}")
-                return True, email, password, "Account created successfully", session
-            else:
-                logger.warning(f"Registration failed on {self.domain}: {data.get('msg')}")
-                await session.close()
-                return False, email, password, data.get("msg", "Unknown error"), None
+            for path in self.register_paths:
+                url = f"{self.base_url}{path}"
+                for _ in range(2):
+                    payload = {
+                        "email": email,
+                        "password": password,
+                        "confirmPassword": password,
+                        "promo_code": referral_code,
+                        "source": None
+                    }
+                    status_code, data, raw = await self._post_json(session, url, headers, payload)
+                    msg = data.get("msg", "").strip() if isinstance(data, dict) else ""
+                    code = data.get("code") if isinstance(data, dict) else None
+
+                    if status_code == 200 and code == 0:
+                        logger.info(f"Account registered: {email} on {self.domain} via {path}")
+                        return True, email, password, "Account created successfully", session
+
+                    detail = msg or (raw[:160] if raw else f"http {status_code}")
+                    errors.append(f"{path}: {detail}")
+                    logger.warning(
+                        "Registration failed on %s via %s (status=%s code=%s): %s",
+                        self.domain,
+                        path,
+                        status_code,
+                        code,
+                        detail
+                    )
+
+                    lower_msg = msg.lower()
+                    if "exist" in lower_msg or "already" in lower_msg or "registered" in lower_msg:
+                        email = self._generate_email()
+                        password = self._generate_password(8)
+                        continue
+                    break
+
+            await session.close()
+            fallback_msg = " | ".join(errors[-3:]) if errors else "Unknown error"
+            return False, email, password, fallback_msg, None
         except Exception as e:
             logger.error(f"Registration exception on {self.domain}: {e}")
             await session.close()
@@ -117,23 +195,37 @@ class APIClient:
         Login to account using existing session
         Returns: (success, token, message)
         """
-        url = f"{self.base_url}/h5/taskBase/login"
         headers = self._get_common_headers()
-        
+
         payload = {
             "email": email,
             "password": password
         }
-        
+
         try:
-            response = await session.post(url, headers=headers, json=payload, timeout=120)
-            data = response.json()
-            if data.get("code") == 0:
-                token = data.get("data", {}).get("token", "")
-                return True, token, "Login successful"
-            else:
-                logger.warning(f"Login failed on {self.domain} for {email}: {data.get('msg')} (Response: {response.text})")
-                return False, None, data.get("msg", "Login failed")
+            errors: List[str] = []
+            for path in self.login_paths:
+                url = f"{self.base_url}{path}"
+                status_code, data, raw = await self._post_json(session, url, headers, payload)
+                code = data.get("code") if isinstance(data, dict) else None
+                if status_code == 200 and code == 0:
+                    token = data.get("data", {}).get("token", "")
+                    return True, token, "Login successful"
+
+                msg = data.get("msg", "").strip() if isinstance(data, dict) else ""
+                detail = msg or (raw[:160] if raw else f"http {status_code}")
+                errors.append(f"{path}: {detail}")
+                logger.warning(
+                    "Login failed on %s for %s via %s (status=%s code=%s): %s",
+                    self.domain,
+                    email,
+                    path,
+                    status_code,
+                    code,
+                    detail
+                )
+
+            return False, None, " | ".join(errors[-3:]) if errors else "Login failed"
         except Exception as e:
             logger.error(f"Login exception on {self.domain}: {e}")
             return False, None, str(e)
