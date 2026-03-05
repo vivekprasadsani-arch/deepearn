@@ -15,6 +15,7 @@ class APIClient:
         self.origin = f"https://{domain}"
         self.referer = f"https://{domain}/"
         self.request_timeout = int(os.getenv("API_TIMEOUT", "120"))
+        self.restricted_rotate_retries = max(1, int(os.getenv("RESTRICTED_ROTATE_RETRIES", "4")))
         register_paths_env = os.getenv("ACCOUNT_REGISTER_PATHS", "/h5/taskBase/biz3/register,/h5/taskBase/register")
         self.register_paths = [p.strip() for p in register_paths_env.split(",") if p.strip()]
         if not self.register_paths:
@@ -109,7 +110,9 @@ class APIClient:
             return None
         try:
             enabled = self.db.get_setting("proxy_enabled")
-            if enabled == "1":
+            enabled_value = str(enabled or "").strip().lower()
+            proxy_on = enabled_value in {"1", "true", "on", "yes"}
+            if proxy_on:
                 proxy_url = self.db.get_setting("proxy_url")
                 if proxy_url:
                     proxy_url = proxy_url.strip()
@@ -121,6 +124,9 @@ class APIClient:
                     if session_id:
                         proxy_url = proxy_url.replace("{session}", session_id).replace("{{session}}", session_id)
                     return proxy_url
+                logger.warning("Proxy is enabled but proxy_url is empty in DB settings.")
+            elif enabled_value:
+                logger.warning("Unknown proxy_enabled value '%s'. Expected one of: 1/true/on/yes", enabled)
         except Exception as e:
             logger.error(f"Error reading proxy from DB: {e}")
             return None
@@ -184,18 +190,16 @@ class APIClient:
         Register a new account
         Returns: (success, email, password, message, session)
         """
-        session = self.create_session()
-
         email = self._generate_email()
         password = self._generate_password(8)
-
-        headers = self._get_common_headers(session)
         errors: List[str] = []
+        session = self.create_session()
+        headers = self._get_common_headers(session)
 
         try:
             for index, path in enumerate(self.register_paths):
                 url = f"{self.base_url}{path}"
-                for _ in range(2):
+                for attempt in range(self.restricted_rotate_retries):
                     payload = {
                         "email": email,
                         "password": password,
@@ -224,6 +228,23 @@ class APIClient:
 
                     lower_msg = msg.lower()
                     if "exist" in lower_msg or "already" in lower_msg or "registered" in lower_msg:
+                        email = self._generate_email()
+                        password = self._generate_password(8)
+                        continue
+                    restricted_or_verification = (
+                        "registration is restricted" in lower_msg
+                        or "retrieve verification code again" in lower_msg
+                    )
+                    if restricted_or_verification and attempt < self.restricted_rotate_retries - 1:
+                        logger.info(
+                            "Registration blocked on %s; rotating session/fingerprint/proxy (attempt %s/%s)",
+                            self.domain,
+                            attempt + 1,
+                            self.restricted_rotate_retries,
+                        )
+                        await session.close()
+                        session = self.create_session()
+                        headers = self._get_common_headers(session)
                         email = self._generate_email()
                         password = self._generate_password(8)
                         continue
