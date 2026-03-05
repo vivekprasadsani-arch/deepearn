@@ -16,6 +16,7 @@ class APIClient:
         self.referer = f"https://{domain}/"
         self.request_timeout = int(os.getenv("API_TIMEOUT", "120"))
         self.restricted_rotate_retries = max(1, int(os.getenv("RESTRICTED_ROTATE_RETRIES", "4")))
+        self.proxy_settings_ttl_sec = max(1, int(os.getenv("PROXY_SETTINGS_TTL_SEC", "3")))
         register_paths_env = os.getenv("ACCOUNT_REGISTER_PATHS", "/h5/taskBase/biz3/register,/h5/taskBase/register")
         self.register_paths = [p.strip() for p in register_paths_env.split(",") if p.strip()]
         if not self.register_paths:
@@ -65,6 +66,9 @@ class APIClient:
             },
         ]
         self.browser_majors = [136, 139, 142, 145]
+        self._proxy_cache_until = 0.0
+        self._proxy_cache_enabled = False
+        self._proxy_cache_url: Optional[str] = None
 
     def _build_fingerprint(self) -> Dict[str, str]:
         """Create per-session browser fingerprint."""
@@ -102,31 +106,55 @@ class APIClient:
             timeout=self.request_timeout
         )
         setattr(session, "_codex_fingerprint", fingerprint)
+        setattr(session, "_codex_has_proxy", bool(proxy))
         return session
+
+    def _read_proxy_settings(self) -> Tuple[bool, Optional[str]]:
+        """Read and cache proxy settings from DB for a short TTL."""
+        import time
+
+        now = time.time()
+        if now <= self._proxy_cache_until:
+            return self._proxy_cache_enabled, self._proxy_cache_url
+
+        enabled = self.db.get_setting("proxy_enabled")
+        enabled_value = str(enabled or "").strip().lower()
+        on_values = {"1", "true", "on", "yes"}
+        off_values = {"", "0", "false", "off", "no"}
+
+        if enabled_value in on_values:
+            proxy_url = self.db.get_setting("proxy_url")
+            proxy_url = proxy_url.strip() if proxy_url else None
+            if not proxy_url:
+                logger.warning("Proxy is enabled but proxy_url is empty in DB settings.")
+            self._proxy_cache_enabled = bool(proxy_url)
+            self._proxy_cache_url = proxy_url
+        elif enabled_value in off_values:
+            self._proxy_cache_enabled = False
+            self._proxy_cache_url = None
+        else:
+            logger.warning("Unknown proxy_enabled value '%s'. Expected on/off values.", enabled)
+            self._proxy_cache_enabled = False
+            self._proxy_cache_url = None
+
+        self._proxy_cache_until = now + self.proxy_settings_ttl_sec
+        return self._proxy_cache_enabled, self._proxy_cache_url
 
     def _get_proxy(self, session_id: Optional[str] = None) -> Optional[str]:
         """Get proxy string if enabled and ensure protocol is present"""
         if not self.db:
             return None
         try:
-            enabled = self.db.get_setting("proxy_enabled")
-            enabled_value = str(enabled or "").strip().lower()
-            proxy_on = enabled_value in {"1", "true", "on", "yes"}
-            if proxy_on:
-                proxy_url = self.db.get_setting("proxy_url")
-                if proxy_url:
-                    proxy_url = proxy_url.strip()
-                    # If no protocol specified, default to http://
-                    if "://" not in proxy_url:
-                        # For abcproxy and similar, often they are socks5, but we'll default to http
-                        # and let the user know if it fails.
-                        proxy_url = f"http://{proxy_url}"
-                    if session_id:
-                        proxy_url = proxy_url.replace("{session}", session_id).replace("{{session}}", session_id)
-                    return proxy_url
-                logger.warning("Proxy is enabled but proxy_url is empty in DB settings.")
-            elif enabled_value:
-                logger.warning("Unknown proxy_enabled value '%s'. Expected one of: 1/true/on/yes", enabled)
+            proxy_on, proxy_url = self._read_proxy_settings()
+            if proxy_on and proxy_url:
+                # If no protocol specified, default to http://
+                if "://" not in proxy_url:
+                    # For abcproxy and similar, often they are socks5, but we'll default to http
+                    # and let the user know if it fails.
+                    proxy_url = f"http://{proxy_url}"
+                if session_id:
+                    proxy_url = proxy_url.replace("{session}", session_id).replace("{{session}}", session_id)
+                return proxy_url
         except Exception as e:
             logger.error(f"Error reading proxy from DB: {e}")
             return None
@@ -236,6 +264,9 @@ class APIClient:
                         or "retrieve verification code again" in lower_msg
                     )
                     if restricted_or_verification and attempt < self.restricted_rotate_retries - 1:
+                        if not getattr(session, "_codex_has_proxy", False):
+                            await session.close()
+                            return False, email, password, f"{path}: {detail} (proxy disabled)", None
                         logger.info(
                             "Registration blocked on %s; rotating session/fingerprint/proxy (attempt %s/%s)",
                             self.domain,
