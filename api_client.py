@@ -37,31 +37,73 @@ class APIClient:
                     "Database unavailable; running without DB-backed settings (proxy disabled): %s",
                     e
                 )
-        # Match current browser pattern seen in HAR to reduce anti-bot variance.
-        self.user_agent = os.getenv(
-            "API_USER_AGENT",
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-            "(KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
-        )
+        self.browser_platforms = [
+            {
+                "platform": "Windows",
+                "ua_template": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{major}.0.0.0 Safari/537.36"
+                ),
+                "sec_ch_mobile": "?0",
+            },
+            {
+                "platform": "Linux",
+                "ua_template": (
+                    "Mozilla/5.0 (X11; Linux x86_64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{major}.0.0.0 Safari/537.36"
+                ),
+                "sec_ch_mobile": "?0",
+            },
+            {
+                "platform": "Android",
+                "ua_template": (
+                    "Mozilla/5.0 (Linux; Android 13; SM-G991B) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{major}.0.0.0 Mobile Safari/537.36"
+                ),
+                "sec_ch_mobile": "?1",
+            },
+        ]
+        self.browser_majors = [136, 139, 142, 145]
+
+    def _build_fingerprint(self) -> Dict[str, str]:
+        """Create per-session browser fingerprint."""
+        profile = random.choice(self.browser_platforms)
+        major = str(random.choice(self.browser_majors))
+        return {
+            "session_id": self._generate_random_string(12),
+            "impersonate": "chrome120",
+            "platform": profile["platform"],
+            "sec_ch_mobile": profile["sec_ch_mobile"],
+            "sec_ch_ua": f'"Not:A-Brand";v="99", "Google Chrome";v="{major}", "Chromium";v="{major}"',
+            "user_agent": profile["ua_template"].format(major=major),
+        }
 
     def create_session(self) -> AsyncSession:
         """Create an AsyncSession configured with optional proxy."""
-        proxy = self._get_proxy()
+        fingerprint = self._build_fingerprint()
+        proxy = self._get_proxy(fingerprint["session_id"])
         proxies = {"http": proxy, "https": proxy} if proxy else None
 
         if proxy:
             import re
             masked_proxy = re.sub(r':([^@/:]+)@', ':***@', proxy)
-            logger.info(f"Initializing session with proxy: {masked_proxy}")
+            logger.info(
+                "Initializing isolated session [sid=%s fp=%s] with proxy: %s",
+                fingerprint["session_id"],
+                fingerprint["platform"],
+                masked_proxy
+            )
 
-        return AsyncSession(
-            impersonate="chrome120",
+        session = AsyncSession(
+            impersonate=fingerprint["impersonate"],
             proxies=proxies,
             verify=False,
             timeout=self.request_timeout
         )
+        setattr(session, "_codex_fingerprint", fingerprint)
+        return session
 
-    def _get_proxy(self) -> Optional[str]:
+    def _get_proxy(self, session_id: Optional[str] = None) -> Optional[str]:
         """Get proxy string if enabled and ensure protocol is present"""
         if not self.db:
             return None
@@ -76,6 +118,8 @@ class APIClient:
                         # For abcproxy and similar, often they are socks5, but we'll default to http
                         # and let the user know if it fails.
                         proxy_url = f"http://{proxy_url}"
+                    if session_id:
+                        proxy_url = proxy_url.replace("{session}", session_id).replace("{{session}}", session_id)
                     return proxy_url
         except Exception as e:
             logger.error(f"Error reading proxy from DB: {e}")
@@ -101,8 +145,9 @@ class APIClient:
         """Generate UUID for WhatsApp linking (16 chars is standard)"""
         return ''.join(random.choices(string.ascii_lowercase + string.digits, k=16))
 
-    def _get_common_headers(self, token: Optional[str] = None):
+    def _get_common_headers(self, session: AsyncSession, token: Optional[str] = None):
         """Return a dictionary of common headers used across requests"""
+        fingerprint = getattr(session, "_codex_fingerprint", None) or self._build_fingerprint()
         headers = {
             "accept": "*/*",
             "accept-language": "en-US,en;q=0.9,bn;q=0.8",
@@ -110,7 +155,10 @@ class APIClient:
             "h5-platform": self.domain,
             "origin": self.origin,
             "referer": self.referer,
-            "user-agent": self.user_agent,
+            "user-agent": fingerprint["user_agent"],
+            "sec-ch-ua": fingerprint["sec_ch_ua"],
+            "sec-ch-ua-mobile": fingerprint["sec_ch_mobile"],
+            "sec-ch-ua-platform": f"\"{fingerprint['platform']}\"",
             "x-token": token or ""
         }
         return headers
@@ -141,7 +189,7 @@ class APIClient:
         email = self._generate_email()
         password = self._generate_password(8)
 
-        headers = self._get_common_headers()
+        headers = self._get_common_headers(session)
         errors: List[str] = []
 
         try:
@@ -212,7 +260,7 @@ class APIClient:
         Login to account using existing session
         Returns: (success, token, message)
         """
-        headers = self._get_common_headers()
+        headers = self._get_common_headers(session)
 
         payload = {
             "email": email,
@@ -266,7 +314,7 @@ class APIClient:
         """
         device_uuid = self._generate_uuid()
         url = f"{self.base_url}/h5/taskUser/phoneCode"
-        headers = self._get_common_headers(token)
+        headers = self._get_common_headers(session, token)
         
         # Ensure phone has + if it's missing
         formatted_phone = phone if phone.startswith("+") else f"+{phone}"
@@ -281,7 +329,7 @@ class APIClient:
         }
         
         try:
-            response = await session.post(url, headers=headers, json=payload, timeout=120)
+            response = await session.post(url, headers=headers, json=payload, timeout=self.request_timeout)
             data = response.json()
             if data.get("code") == 0:
                 otp = data.get("data", {}).get("phone_code")
@@ -305,14 +353,14 @@ class APIClient:
         Returns: (is_logged_in, message)
         """
         url = f"{self.base_url}/h5/taskUser/scanCodeResult"
-        headers = self._get_common_headers(token)
+        headers = self._get_common_headers(session, token)
         
         payload = {
             "uuid": device_uuid
         }
         
         try:
-            response = await session.post(url, headers=headers, json=payload, timeout=120)
+            response = await session.post(url, headers=headers, json=payload, timeout=self.request_timeout)
             data = response.json()
             
             # code 0 means success, code 88 means "No results yet"

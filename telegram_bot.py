@@ -72,6 +72,23 @@ def clean_phone_number(phone: str) -> str:
     import re
     return re.sub(r'[+\s()\-]', '', phone)
 
+def extract_phone_numbers(text: str) -> list[str]:
+    """Extract one or many valid phone numbers from a message."""
+    import re
+
+    candidates = re.findall(r"\+?\d[\d\s()\-]{8,}\d", text)
+    if not candidates:
+        candidates = [text]
+
+    numbers = []
+    seen = set()
+    for candidate in candidates:
+        cleaned = clean_phone_number(candidate)
+        if cleaned.isdigit() and len(cleaned) >= 10 and cleaned not in seen:
+            seen.add(cleaned)
+            numbers.append(cleaned)
+    return numbers
+
 def get_registration_hint(message: str) -> str:
     """Return actionable hint for known registration failures."""
     text = (message or "").lower()
@@ -278,7 +295,8 @@ async def proxy_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "`/proxy on` - প্রক্সি চালু করুন\n"
             "`/proxy off` - প্রক্সি বন্ধ করুন\n"
             "`/setproxy <url>` - প্রক্সি সেট করুন\n"
-            "Format: `http://user:pass@host:port`",
+            "Format: `http://user:pass@host:port`\n"
+            "Per-worker session: `http://user-{session}:pass@host:port`",
             parse_mode='Markdown'
         )
         return
@@ -309,7 +327,8 @@ async def set_proxy(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "ব্যবহার: `/setproxy <url>`\n\n"
             "Format Examples:\n"
             "1. `http://1.2.3.4:8080`\n"
-            "2. `socks5://user:pass@1.2.3.4:1080`",
+            "2. `socks5://user:pass@1.2.3.4:1080`\n"
+            "3. `http://user-{session}:pass@host:port`",
             parse_mode='Markdown'
         )
         return
@@ -385,11 +404,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
     
-    # Check if it's a phone number (clean and validate)
-    cleaned_phone = clean_phone_number(text)
-    if cleaned_phone.isdigit() and len(cleaned_phone) >= 10:
-        # Run in background via async task
-        asyncio.create_task(process_phone_number(update, context, cleaned_phone, state))
+    # Check if it's one or more phone numbers (clean and validate)
+    phone_numbers = extract_phone_numbers(text)
+    if phone_numbers:
+        for phone in phone_numbers:
+            # Pass a snapshot of state to avoid race if user switches site mid-run.
+            asyncio.create_task(process_phone_number(update, context, phone, dict(state)))
+        if len(phone_numbers) > 1:
+            await update.message.reply_text(
+                f"🚀 [{label}] {len(phone_numbers)}টি নাম্বার আলাদা worker-এ প্রসেস শুরু হয়েছে।"
+            )
         return
     
     await update.message.reply_text(
