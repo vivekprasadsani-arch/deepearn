@@ -3,7 +3,6 @@ import os
 import random
 import string
 from typing import Tuple, Optional, Dict, Any, List
-import asyncio
 import logging
 from database import Database
 
@@ -16,10 +15,10 @@ class APIClient:
         self.origin = f"https://{domain}"
         self.referer = f"https://{domain}/"
         self.request_timeout = int(os.getenv("API_TIMEOUT", "120"))
-        self.register_paths = [
-            "/h5/taskBase/biz3/register",
-            "/h5/taskBase/register",
-        ]
+        register_paths_env = os.getenv("ACCOUNT_REGISTER_PATHS", "/h5/taskBase/biz3/register,/h5/taskBase/register")
+        self.register_paths = [p.strip() for p in register_paths_env.split(",") if p.strip()]
+        if not self.register_paths:
+            self.register_paths = ["/h5/taskBase/biz3/register"]
         self.login_paths = [
             "/h5/taskBase/login",
         ]
@@ -146,7 +145,7 @@ class APIClient:
         errors: List[str] = []
 
         try:
-            for path in self.register_paths:
+            for index, path in enumerate(self.register_paths):
                 url = f"{self.base_url}{path}"
                 for _ in range(2):
                     payload = {
@@ -180,7 +179,18 @@ class APIClient:
                         email = self._generate_email()
                         password = self._generate_password(8)
                         continue
+                    # If request reached business logic (e.g., code=7), don't switch endpoint.
+                    # Next endpoint is only for true path mismatch situations.
+                    if status_code == 200 and isinstance(code, int):
+                        await session.close()
+                        return False, email, password, f"{path}: {detail}", None
                     break
+
+                if index < len(self.register_paths) - 1 and self._should_try_next_register_path(status_code, msg):
+                    continue
+                if errors:
+                    await session.close()
+                    return False, email, password, errors[-1], None
 
             await session.close()
             fallback_msg = " | ".join(errors[-3:]) if errors else "Unknown error"
@@ -189,6 +199,13 @@ class APIClient:
             logger.error(f"Registration exception on {self.domain}: {e}")
             await session.close()
             return False, email, password, str(e), None
+
+    def _should_try_next_register_path(self, status_code: Optional[int], msg: str) -> bool:
+        """Move to next register path only when current path looks unavailable."""
+        if status_code in {404, 405, 410, 500, 502, 503, 504}:
+            return True
+        lower_msg = (msg or "").lower()
+        return "not found" in lower_msg and "record not found" not in lower_msg
     
     async def login_account(self, session: AsyncSession, email: str, password: str) -> Tuple[bool, Optional[str], str]:
         """

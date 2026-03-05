@@ -72,6 +72,17 @@ def clean_phone_number(phone: str) -> str:
     import re
     return re.sub(r'[+\s()\-]', '', phone)
 
+def get_registration_hint(message: str) -> str:
+    """Return actionable hint for known registration failures."""
+    text = (message or "").lower()
+    if "record not found" in text:
+        return "\n\n💡 রেফার কোডটি এই সাইটের জন্য বৈধ নয়। নতুন/সঠিক রেফার কোড দিন।"
+    if "registration is restricted" in text:
+        return "\n\n💡 সাইট রেজিস্ট্রেশন রিকোয়েস্ট সীমাবদ্ধ করছে (IP/region/rate limit)। প্রক্সি অন করে আবার চেষ্টা করুন।"
+    if "retrieve verification code again" in text:
+        return "\n\n💡 সার্ভার ভেরিফিকেশন-চেক চাইছে। কিছুক্ষণ পর পুনরায় চেষ্টা করুন বা প্রক্সি ব্যবহার করুন।"
+    return ""
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /start command"""
     user_id = update.effective_user.id
@@ -414,7 +425,8 @@ async def process_phone_number(update: Update, context: ContextTypes.DEFAULT_TYP
         success, email, password, msg, session = await api.register_account(referral_code)
         
         if not success:
-            await status_msg.edit_text(f"❌ [{mode_label}] অ্যাকাউন্ট তৈরি ব্যর্থ: {msg}")
+            hint = get_registration_hint(msg)
+            await status_msg.edit_text(f"❌ [{mode_label}] অ্যাকাউন্ট তৈরি ব্যর্থ: {msg}{hint}")
             return
         
         try:
